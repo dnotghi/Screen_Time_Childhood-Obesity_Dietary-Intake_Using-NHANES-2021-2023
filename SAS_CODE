@@ -1,0 +1,181 @@
+*load NHANES datasets; 
+
+Title "Sample Characteristics By Screen Time Categories, National Health and Nutrition Examination Survey, 2021-2023 (N=)";
+filename BMX_L url "https://wwwn.cdc.gov/Nchs/Data/Nhanes/Public/2021/DataFiles/BMX_L.xpt";
+libname BMX_L xport;
+proc copy inlib= BMX_L out=work;
+run;
+libname NHANES "/home/u63890076/Epi Project";
+data NHANES.BMX_L;
+	set BMX_L;
+run;
+
+filename DEMO_L url "https://wwwn.cdc.gov/Nchs/Data/Nhanes/Public/2021/DataFiles/DEMO_L.xpt";
+libname DEMO_L xport;
+proc copy inlib = DEMO_L out=work;
+run;
+data NHANES.DEMO_L;
+	set demo_l;
+run;
+
+libname NHANES "/home/u63890076/Epi Project";
+filename PAQY_L url "https://wwwn.cdc.gov/Nchs/Data/Nhanes/Public/2021/DataFiles/PAQY_L.xpt";
+libname PAQY_L xport;
+proc copy inlib = PAQY_L out= work;
+run;
+data NHANES.PAQY_L;
+	set PAQY_L;
+run;
+
+filename DR1IFF_L url "https://wwwn.cdc.gov/Nchs/Data/Nhanes/Public/2021/DataFiles/DR1IFF_L.xpt";
+libname DR1IFF_L xport;
+proc copy inlib = DR1IFF_L out= work;
+run;
+data NHANES.DR1IFF_L;
+	set DR1IFF_L;
+run;
+/* Sort each dataset before merging */
+proc sort data=DEMO_L; by SEQN; run;
+proc sort data=BMX_L; by SEQN; run;
+proc sort data=PAQY_L; by SEQN; run;
+proc sort data=DR1IFF_L; by SEQN; run;
+
+*MERGE NHANES DATASETS*;
+DATA NHANES.MERGE;
+    MERGE DEMO_L (KEEP=SEQN RIDAGEYR RIAGENDR SDMVSTRA SDMVPSU WTMEC2YR)
+          BMX_L (KEEP=SEQN BMXBMI)
+          PAQY_L (KEEP=SEQN PAQ711)
+          DR1IFF_L (KEEP=SEQN DR1ISUGR DR1ITFAT);
+    BY SEQN;
+/* Recode invalid values as missing */
+    IF BMXBMI IN (99.99, 999.9) THEN BMXBMI = .;
+    IF PAQ711 IN (7777, 9999) THEN PAQ711 = .;
+    IF DR1ISUGR IN (7777, 9999) THEN DR1ISUGR = .;
+    IF DR1ITFAT IN (7777, 9999) THEN DR1ITFAT = .;
+    IF RIAGENDR IN (7, 9) THEN RIAGENDR = .;
+    /* Restrict to children aged 6-18 */
+    IF 6 <= RIDAGEYR <= 18;
+
+    /* Primary Exposure: Screentime */
+    IF PAQ711 < 2 THEN ScreenTime_Cat = "Low (<2 hrs/day)";
+    ELSE IF PAQ711 >= 2 AND PAQ711 <= 4 THEN ScreenTime_Cat = "Moderate (2-4 hrs/day)";
+    ELSE IF PAQ711 > 4 THEN ScreenTime_Cat = "High (>4 hrs/day)";
+    ELSE ScreenTime_Cat = "Missing";
+
+    /*Primary outcome: obesity*/
+IF BMXBMI NE . THEN DO;
+    IF BMXBMI >= 30 THEN DO;
+        BMI_Category = "Obese (BMI ≥ 30)";
+        Obese = 1;
+    END;
+    ELSE IF 25 <= BMXBMI < 30 THEN DO;
+        BMI_Category = "Overweight (BMI 25-29.9)";
+        Obese = 0;
+    END;
+    ELSE IF 18.5 <= BMXBMI < 25 THEN DO;
+        BMI_Category = "Normal weight (BMI 18.5-24.9)";
+        Obese = 0;
+    END;
+    ELSE IF BMXBMI < 18.5 THEN DO;
+        BMI_Category = "Underweight (BMI < 18.5)";
+        Obese = 0;
+    END;
+END;
+/*Covariates*/
+/* Age: RIDAGEYR
+       Sex: RIAGENDR (1 = Male, 2 = Female)
+       Dietary: DR1ISUGR (sugar), DR1ITFAT (fat) */
+      
+    /* Keep necessary variable */
+    KEEP SEQN ScreenTime_Cat BMI_Category RIAGENDR RIDAGEYR DR1ISUGR DR1ITFAT Obese SDMVSTRA SDMVPSU WTMEC2YR;
+RUN;
+
+proc freq data=NHANES.merge;
+	tables obese/ missing;
+run;
+
+*DESCRIPTIVE CODE*;
+PROC MEANS DATA=NHANES.MERGE N MEAN STD;
+    CLASS ScreenTime_Cat;
+    VAR RIDAGEYR DR1ISUGR DR1ITFAT;
+    OUTPUT OUT=DescriptiveStats 
+        N=Total_N MEAN=Age_Mean Sugar_Mean Fat_Mean 
+        STD=Age_SD Sugar_SD Fat_SD;
+RUN;
+
+/* Frequency Table for Obesity and Gender */
+PROC FREQ DATA=NHANES.MERGE;
+    TABLES ScreenTime_Cat*BMI_Category / CHISQ OUT=BMITable;
+    TABLES ScreenTime_Cat*RIAGENDR / CHISQ OUT=GenderTable;
+RUN;
+
+
+TITLE "Association Between Screen Time, Dietary Habits, and Obesity Prevalence Among U.S. Children (National Health and Nutrition Examination Survey, 2021-2023, (N=)";
+
+/* Step 1: Create Binary Obesity Variable */
+DATA NHANES.MERGE;
+    SET NHANES.MERGE;
+    
+    /* Create Binary Obesity Outcome (1 = Obese, 0 = Not Obese) */
+    IF BMI_Category = "Obese (BMI ≥ 30)" THEN Obese = 1;
+ELSE IF BMI_Category IN (
+    "Overweight (BMI 25-29.9)",
+    "Normal weight (BMI 18.5–24.9)",
+    "Underweight (BMI < 18.5)") THEN Obese = 0;
+PROC FREQ DATA=NHANES.MERGE;
+    TABLES ScreenTime_Cat;
+RUN;
+/* Step 2: Logistic Regression - Model 1 (Unadjusted) */
+PROC LOGISTIC DATA=NHANES.MERGE DESCENDING PLOTS (MAXPOINTS=NONE);
+    CLASS ScreenTime_Cat (REF="Low (<2 hrs/day)") RIAGENDR (REF="1") / PARAM=REF;
+    MODEL Obese (event= '1')= ScreenTime_Cat;
+    ODDSRATIO ScreenTime_Cat;
+    OUTPUT OUT=Model1 P=Pred1;
+RUN;
+
+/* Step 3: Logistic Regression - Model 2 (Adjusted for Age & Sex) */
+PROC LOGISTIC DATA=NHANES.MERGE DESCENDING PLOTS (MAXPOINTS=NONE);
+    CLASS ScreenTime_Cat (REF="Low (<2 hrs/day)") RIAGENDR (REF="1") / PARAM=REF;
+    MODEL Obese (event= '1') = ScreenTime_Cat RIDAGEYR RIAGENDR;
+    ODDSRATIO ScreenTime_Cat;
+    OUTPUT OUT=Model2 P=Pred2;
+RUN;
+
+/* Step 4: Logistic Regression - Model 3 (Adjusted for Age, Sex, and Dietary Intake) */
+PROC LOGISTIC DATA=NHANES.MERGE DESCENDING PLOTS (MAXPOINTS=NONE);
+    CLASS ScreenTime_Cat (REF="Low (<2 hrs/day)") RIAGENDR (REF="1") / PARAM=REF;
+    MODEL Obese (event= '1')= ScreenTime_Cat RIDAGEYR RIAGENDR DR1ISUGR DR1ITFAT;
+    ODDSRATIO ScreenTime_Cat;
+    ODDSRATIO DR1ISUGR;
+    ODDSRATIO DR1ITFAT;
+    OUTPUT OUT=Model3 P=Pred3;
+RUN;
+
+/*SURVEY WEIGHTED ANALYSIS*/
+/* Survey-weighted logistic regression models */
+proc surveylogistic data=NHANES.MERGE;
+    strata SDMVSTRA;
+    cluster SDMVPSU;
+    weight WTMEC2YR;
+    class ScreenTime_Cat (ref="Low (<2 hrs/day)") / param=ref;
+    model Obese(event='1') = ScreenTime_Cat;
+run;
+
+proc surveylogistic data=NHANES.MERGE;
+    strata SDMVSTRA;
+    cluster SDMVPSU;
+    weight WTMEC2YR;
+    class ScreenTime_Cat (ref="Low (<2 hrs/day)") RIAGENDR (ref="1") / param=ref;
+    model Obese(event='1') = ScreenTime_Cat RIDAGEYR RIAGENDR;
+run;
+
+proc surveylogistic data=NHANES.MERGE;
+    strata SDMVSTRA;
+    cluster SDMVPSU;
+    weight WTMEC2YR;
+    class ScreenTime_Cat (ref="Low (<2 hrs/day)") RIAGENDR (ref="1") / param=ref;
+    model Obese(event='1') = ScreenTime_Cat RIDAGEYR RIAGENDR DR1ISUGR DR1ITFAT;
+run;
+
+
+
